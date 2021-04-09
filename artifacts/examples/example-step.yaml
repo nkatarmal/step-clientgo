@@ -1,0 +1,6 @@
+apiVersion: stepcontroller.k8s.io/v1alpha1
+kind: Step
+metadata:
+  name: onemore
+spec:
+  namespace: test

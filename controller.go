@@ -24,8 +24,8 @@ import (
 	samplev1alpha1 "github.com/nkatarmal/step-clientgo/pkg/apis/stepcontroller/v1alpha1"
 	clientset "github.com/nkatarmal/step-clientgo/pkg/generated/clientset/versioned"
 	samplescheme "github.com/nkatarmal/step-clientgo/pkg/generated/clientset/versioned/scheme"
-	informers "github.com/nkatarmal/step-clientgo/pkg/generated/informers/externalversions/samplecontroller/v1alpha1"
-	listers "github.com/nkatarmal/step-clientgo/pkg/generated/listers/samplecontroller/v1alpha1"
+	informers "github.com/nkatarmal/step-clientgo/pkg/generated/informers/externalversions/stepcontroller/v1alpha1"
+	listers "github.com/nkatarmal/step-clientgo/pkg/generated/listers/stepcontroller/v1alpha1"
 )
 
 const controllerAgentName = "step-controller"
@@ -54,7 +54,7 @@ type Controller struct {
 
 	deploymentsLister appslisters.DeploymentLister
 	deploymentsSynced cache.InformerSynced
-	foosLister        listers.FooLister
+	foosLister        listers.StepLister
 	foosSynced        cache.InformerSynced
 
 	// workqueue is a rate limited work queue. This is used to queue work to be
@@ -234,6 +234,7 @@ func (c *Controller) syncHandler(key string) error {
 
 	// Get the Foo resource with this namespace/name
 	foo, err := c.foosLister.Steps(namespace).Get(name)
+
 	if err != nil {
 		// The Foo resource may no longer exist, in which case we stop
 		// processing.
@@ -245,74 +246,63 @@ func (c *Controller) syncHandler(key string) error {
 		return err
 	}
 
-	deploymentName := foo.Spec.DeploymentName
-	if deploymentName == "" {
-		// We choose to absorb the error here as the worker would requeue the
-		// resource otherwise. Instead, the next time the resource is updated
-		// the resource will be queued again.
-		utilruntime.HandleError(fmt.Errorf("%s: deployment name must be specified", key))
-		return nil
-	}
+	if isHourElapsed(foo.Status.LastExecuted) {
+		pods, err := c.kubeclientset.CoreV1().Pods(foo.Spec.Namespace).List(context.TODO(), metav1.ListOptions{})
 
-	// Get the deployment with the name specified in Foo.spec
-	deployment, err := c.deploymentsLister.Deployments(foo.Namespace).Get(deploymentName)
-	// If the resource doesn't exist, we'll create it
-	if errors.IsNotFound(err) {
-		deployment, err = c.kubeclientset.AppsV1().Deployments(foo.Namespace).Create(context.TODO(), newDeployment(foo), metav1.CreateOptions{})
-	}
+		if err != nil {
+			klog.Info("Error while getting Pod List")
+		}
 
-	// If an error occurs during Get/Create, we'll requeue the item so we can
-	// attempt processing again later. This could have been caused by a
-	// temporary network failure, or any other transient reason.
-	if err != nil {
-		return err
-	}
+		for _, pod := range pods.Items {
+			klog.Info(fmt.Sprintf("Pod from the name space %s pod name %s : %s", foo.Spec.Namespace, pod.Name, pod.Spec.NodeName))
+		}
 
-	// If the Deployment is not controlled by this Foo resource, we should log
-	// a warning to the event recorder and return error msg.
-	if !metav1.IsControlledBy(deployment, foo) {
-		msg := fmt.Sprintf(MessageResourceExists, deployment.Name)
-		c.recorder.Event(foo, corev1.EventTypeWarning, ErrResourceExists, msg)
-		return fmt.Errorf(msg)
-	}
+		// If an error occurs during Update, we'll requeue the item so we can
+		// attempt processing again later. This could have been caused by a
+		// temporary network failure, or any other transient reason.
+		if err != nil {
+			return err
+		}
 
-	// If this number of the replicas on the Foo resource is specified, and the
-	// number does not equal the current desired replicas on the Deployment, we
-	// should update the Deployment resource.
-	if foo.Spec.Replicas != nil && *foo.Spec.Replicas != *deployment.Spec.Replicas {
-		klog.V(4).Infof("Foo %s replicas: %d, deployment replicas: %d", name, *foo.Spec.Replicas, *deployment.Spec.Replicas)
-		deployment, err = c.kubeclientset.AppsV1().Deployments(foo.Namespace).Update(context.TODO(), newDeployment(foo), metav1.UpdateOptions{})
-	}
+		// Finally, we update the status block of the Foo resource to reflect the
+		// current state of the world
+		err = c.updateFooStatus(foo)
+		if err != nil {
+			return err
+		}
 
-	// If an error occurs during Update, we'll requeue the item so we can
-	// attempt processing again later. This could have been caused by a
-	// temporary network failure, or any other transient reason.
-	if err != nil {
-		return err
-	}
-
-	// Finally, we update the status block of the Foo resource to reflect the
-	// current state of the world
-	err = c.updateFooStatus(foo, deployment)
-	if err != nil {
-		return err
 	}
 
 	c.recorder.Event(foo, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
 	return nil
 }
 
-func (c *Controller) updateFooStatus(foo *samplev1alpha1.Step, deployment *appsv1.Deployment) error {
+func isHourElapsed(since *metav1.Time) bool {
+	if since != nil {
+		now := metav1.Now()
+		time_diff := now.Sub(since.Time)
+		hours_elapsed := time_diff.Minutes()
+
+		if hours_elapsed >= 1 {
+			return true
+		} else {
+			return false
+		}
+	} else {
+		return true
+	}
+}
+func (c *Controller) updateFooStatus(foo *samplev1alpha1.Step) error {
 	// NEVER modify objects from the store. It's a read-only, local cache.
 	// You can use DeepCopy() to make a deep copy of original object and modify this copy
 	// Or create a copy manually for better performance
 	fooCopy := foo.DeepCopy()
-	fooCopy.Status.AvailableReplicas = deployment.Status.AvailableReplicas
 	// If the CustomResourceSubresources feature gate is not enabled,
 	// we must use Update instead of UpdateStatus to update the Status block of the Foo resource.
 	// UpdateStatus will not allow changes to the Spec of the resource,
 	// which is ideal for ensuring nothing other than resource status has been updated.
-	_, err := c.sampleclientset.SamplecontrollerV1alpha1().Foos(foo.Namespace).Update(context.TODO(), fooCopy, metav1.UpdateOptions{})
+	fooCopy.Status.LastExecuted = &metav1.Time{Time: time.Now()}
+	_, err := c.sampleclientset.StepcontrollerV1alpha1().Steps(foo.Namespace).Update(context.TODO(), fooCopy, metav1.UpdateOptions{})
 	return err
 }
 
@@ -354,7 +344,7 @@ func (c *Controller) handleObject(obj interface{}) {
 	if ownerRef := metav1.GetControllerOf(object); ownerRef != nil {
 		// If this object is not owned by a Foo, we should not do anything more
 		// with it.
-		if ownerRef.Kind != "Foo" {
+		if ownerRef.Kind != "Step" {
 			return
 		}
 
@@ -366,43 +356,5 @@ func (c *Controller) handleObject(obj interface{}) {
 
 		c.enqueueFoo(foo)
 		return
-	}
-}
-
-// newDeployment creates a new Deployment for a Foo resource. It also sets
-// the appropriate OwnerReferences on the resource so handleObject can discover
-// the Foo resource that 'owns' it.
-func newDeployment(foo *samplev1alpha1.Step) *appsv1.Deployment {
-	labels := map[string]string{
-		"app":        "nginx",
-		"controller": foo.Name,
-	}
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      foo.Spec.DeploymentName,
-			Namespace: foo.Namespace,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(foo, samplev1alpha1.SchemeGroupVersion.WithKind("Step")),
-			},
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: foo.Spec.Replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "nginx",
-							Image: "nginx:latest",
-						},
-					},
-				},
-			},
-		},
 	}
 }

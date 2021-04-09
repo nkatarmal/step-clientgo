@@ -17,12 +17,11 @@ type Step struct {
 }
 
 type StepSpec struct {
-	DeploymentName string `json:"deploymentName"`
-	Replicas       *int32 `json:"replicas"`
+	Namespace string `json:"namespace"`
 }
 
 type StepStatus struct {
-	AvailableReplicas int32 `json:"availableReplicas"`
+	LastExecuted *metav1.Time `json:"lastExecuted,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
